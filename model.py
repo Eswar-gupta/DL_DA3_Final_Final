@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 _MODULE_DIR = Path(__file__).resolve().parent
-DEFAULT_CHECKPOINT_FILE_ID = "188faMeti26ZBokMdjjxOmZwGEDXFrpCL"
+DEFAULT_CHECKPOINT_FILE_ID = "15DTM48pqCRiE4EBYDB5yg5W53gsbUoCS"
 DEFAULT_CHECKPOINT_PATH = _MODULE_DIR / "checkpoints" / "best_bleu_checkpoint.pt"
 PAD_TOKEN = "<pad>"
 SOS_TOKEN = "<sos>"

@@ -55,6 +55,16 @@ class TokenVocabularyStore:
     def lookup_indices(self, tokens: Iterable[str]) -> list[int]:
         return [self[token_text] for token_text in tokens]
 
+    @classmethod
+    def from_tokens(cls, tokens: list[str]) -> "TokenVocabularyStore":
+        vocab = cls()
+        vocab.itos = list(tokens)
+        vocab.stoi = {
+            token_name: token_position for token_position, token_name in enumerate(vocab.itos)
+        }
+        vocab.default_index = vocab.stoi.get(UNK_TOKEN, 0)
+        return vocab
+
 
 Vocab = TokenVocabularyStore
 

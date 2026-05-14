@@ -690,6 +690,31 @@ class Transformer(nn.Module):
             self._inference_tgt_vocab = None
             self._inference_src_tokenizer = None
 
+    def _restore_text_inference_assets_from_checkpoint(self, checkpoint) -> bool:
+        if not isinstance(checkpoint, dict):
+            return False
+
+        src_vocab_tokens = checkpoint.get("src_vocab_tokens")
+        tgt_vocab_tokens = checkpoint.get("tgt_vocab_tokens")
+        if not src_vocab_tokens or not tgt_vocab_tokens:
+            return False
+
+        try:
+            from dataset import Multi30kDataset, TokenVocabularyStore
+        except Exception:
+            return False
+
+        try:
+            self._inference_src_vocab = TokenVocabularyStore.from_tokens(src_vocab_tokens)
+            self._inference_tgt_vocab = TokenVocabularyStore.from_tokens(tgt_vocab_tokens)
+            self._inference_src_tokenizer = Multi30kDataset._obtain_tokenizer("de")
+            return True
+        except Exception:
+            self._inference_src_vocab = None
+            self._inference_tgt_vocab = None
+            self._inference_src_tokenizer = None
+            return False
+
     def _checkpoint_state_dict_matches_model(self, state_dict: dict) -> bool:
         current_state = self.state_dict()
         if set(state_dict.keys()) != set(current_state.keys()):
@@ -745,6 +770,7 @@ class Transformer(nn.Module):
             return
 
         self.load_state_dict(state_dict)
+        self._restore_text_inference_assets_from_checkpoint(checkpoint)
         self._inference_checkpoint_loaded = True
 
     def _decode_generated_token_ids(self, token_ids: list[int], tgt_vocab) -> str:

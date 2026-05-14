@@ -325,6 +325,8 @@ def save_checkpoint(
     scheduler,
     epoch: int,
     path: str = "checkpoint.pt",
+    src_vocab=None,
+    tgt_vocab=None,
 ) -> None:
     """
     Save model + optimiser + scheduler state to disk.
@@ -348,6 +350,8 @@ def save_checkpoint(
             "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
             "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
             "model_config": model_config,
+            "src_vocab_tokens": list(src_vocab.itos) if src_vocab is not None and hasattr(src_vocab, "itos") else None,
+            "tgt_vocab_tokens": list(tgt_vocab.itos) if tgt_vocab is not None and hasattr(tgt_vocab, "itos") else None,
         },
         checkpoint_path,
     )
@@ -374,6 +378,8 @@ def load_checkpoint(
     except TypeError:
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model.load_state_dict(checkpoint["model_state_dict"])
+    if hasattr(model, "_restore_text_inference_assets_from_checkpoint"):
+        model._restore_text_inference_assets_from_checkpoint(checkpoint)
     if hasattr(model, "_inference_checkpoint_loaded"):
         model._inference_checkpoint_loaded = True
 
@@ -641,10 +647,26 @@ def run_training_experiment(overrides: Optional[dict] = None) -> None:
                 device=str(device),
             )
 
-            save_checkpoint(model, optimizer, scheduler, epoch, str(latest_path))
+            save_checkpoint(
+                model,
+                optimizer,
+                scheduler,
+                epoch,
+                str(latest_path),
+                src_vocab=train_dataset.src_vocab,
+                tgt_vocab=train_dataset.tgt_vocab,
+            )
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                save_checkpoint(model, optimizer, scheduler, epoch, str(best_path))
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    scheduler,
+                    epoch,
+                    str(best_path),
+                    src_vocab=train_dataset.src_vocab,
+                    tgt_vocab=train_dataset.tgt_vocab,
+                )
 
             lr = scheduler.get_last_lr()[0] if scheduler is not None else optimizer.param_groups[0]["lr"]
 

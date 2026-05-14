@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 _MODULE_DIR = Path(__file__).resolve().parent
-DEFAULT_CHECKPOINT_FILE_ID = "15DTM48pqCRiE4EBYDB5yg5W53gsbUoCS"
+DEFAULT_CHECKPOINT_FILE_ID = "188faMeti26ZBokMdjjxOmZwGEDXFrpCL"
 DEFAULT_CHECKPOINT_PATH = _MODULE_DIR / "checkpoints" / "best_bleu_checkpoint.pt"
 PAD_TOKEN = "<pad>"
 SOS_TOKEN = "<sos>"
@@ -182,20 +182,6 @@ def make_tgt_mask(
 
 
 class MultiHeadAttention(nn.Module):
-    """
-    Multi-Head Attention as in "Attention Is All You Need", §3.2.2.
-
-        MultiHead(Q,K,V) = Concat(head_1,...,head_h) · W_O
-        head_i = Attention(Q·W_Qi, K·W_Ki, V·W_Vi)
-
-    You are NOT allowed to use torch.nn.MultiheadAttention.
-
-    Args:
-        d_model   (int)  : Total model dimensionality. Must be divisible by num_heads.
-        num_heads (int)  : Number of parallel attention heads h.
-        dropout   (float): Dropout probability applied to attention weights.
-    """
-
     def __init__(
         self,
         d_model: int,
@@ -225,19 +211,6 @@ class MultiHeadAttention(nn.Module):
         value: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Args:
-            query : shape [batch, seq_q, d_model]
-            key   : shape [batch, seq_k, d_model]
-            value : shape [batch, seq_k, d_model]
-            mask  : Optional BoolTensor broadcastable to
-                    [batch, num_heads, seq_q, seq_k]
-                    True → masked out (attend nowhere)
-
-        Returns:
-            output : shape [batch, seq_q, d_model]
-
-        """
         batch_size = query.size(0)
 
         def project(linear: nn.Linear, x: torch.Tensor) -> torch.Tensor:

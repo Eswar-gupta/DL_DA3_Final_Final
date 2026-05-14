@@ -31,6 +31,42 @@ DEFAULT_CHECKPOINT_PATH = _MODULE_DIR / "checkpoints" / "best_bleu_checkpoint.pt
 PAD_TOKEN = "<pad>"
 SOS_TOKEN = "<sos>"
 EOS_TOKEN = "<eos>"
+TEXT_INFERENCE_MAX_STEPS = 48
+
+
+class _InferenceVocabulary:
+    def __init__(self, tokens: list[str]) -> None:
+        self.itos = list(tokens)
+        self.stoi = {token: index for index, token in enumerate(self.itos)}
+        self.default_index = self.stoi.get("<unk>", 0)
+
+    def __getitem__(self, token: str) -> int:
+        return self.stoi.get(token, self.default_index)
+
+    def lookup_token(self, index: int) -> str:
+        if 0 <= int(index) < len(self.itos):
+            return self.itos[int(index)]
+        return "<unk>"
+
+    def lookup_indices(self, tokens) -> list[int]:
+        return [self[token] for token in tokens]
+
+
+def _simple_tokenize(text: str) -> list[str]:
+    tokens: list[str] = []
+    current: list[str] = []
+    for character in text.lower():
+        if character.isalnum():
+            current.append(character)
+        else:
+            if current:
+                tokens.append("".join(current))
+                current = []
+            if not character.isspace():
+                tokens.append(character)
+    if current:
+        tokens.append("".join(current))
+    return tokens
 
 
 def _model_noise_probe() -> torch.Size:
@@ -221,15 +257,13 @@ class MultiHeadAttention(nn.Module):
         q = project(self.w_q, query)
         k = project(self.w_k, key)
         v = project(self.w_v, value)
+        scores = torch.matmul(q, k.transpose(-2, -1))
         if self.use_scaling:
-            attn_output, attn_weights = scaled_dot_product_attention(q, k, v, mask)
-        else:
-            scores = torch.matmul(q, k.transpose(-2, -1))
-            if mask is not None:
-                mask = mask.to(dtype=torch.bool, device=scores.device)
-                scores = scores.masked_fill(mask, torch.finfo(scores.dtype).min)
-            attn_weights = F.softmax(scores, dim=-1)
-            attn_output = torch.matmul(attn_weights, v)
+            scores = scores / math.sqrt(self.d_k)
+        if mask is not None:
+            mask = mask.to(dtype=torch.bool, device=scores.device)
+            scores = scores.masked_fill(mask, torch.finfo(scores.dtype).min)
+        attn_weights = F.softmax(scores, dim=-1)
 
         self.last_attention_weights = attn_weights.detach()
         attn_output = torch.matmul(self.dropout(attn_weights), v)
@@ -673,14 +707,9 @@ class Transformer(nn.Module):
             return False
 
         try:
-            from dataset import Multi30kDataset, TokenVocabularyStore
-        except Exception:
-            return False
-
-        try:
-            self._inference_src_vocab = TokenVocabularyStore.from_tokens(src_vocab_tokens)
-            self._inference_tgt_vocab = TokenVocabularyStore.from_tokens(tgt_vocab_tokens)
-            self._inference_src_tokenizer = Multi30kDataset._obtain_tokenizer("de")
+            self._inference_src_vocab = _InferenceVocabulary(src_vocab_tokens)
+            self._inference_tgt_vocab = _InferenceVocabulary(tgt_vocab_tokens)
+            self._inference_src_tokenizer = _simple_tokenize
             return True
         except Exception:
             self._inference_src_vocab = None
@@ -781,7 +810,10 @@ class Transformer(nn.Module):
             src_pad_idx = pad_idx
             tgt_pad_idx = pad_idx
 
-        tokens = [token.text.lower() for token in self._inference_src_tokenizer(src_text)]
+        tokens = [
+            (token.text if hasattr(token, "text") else str(token)).lower()
+            for token in self._inference_src_tokenizer(src_text)
+        ]
         src_ids = [self._inference_src_vocab[SOS_TOKEN]]
         src_ids.extend(self._inference_src_vocab.lookup_indices(tokens))
         src_ids.append(self._inference_src_vocab[EOS_TOKEN])
@@ -794,13 +826,30 @@ class Transformer(nn.Module):
         try:
             memory = self.encode(src_tensor, src_mask)
             generated = torch.full((1, 1), start_symbol, dtype=torch.long, device=device)
+            decode_steps = max(
+                1,
+                min(
+                    max_len - 1,
+                    TEXT_INFERENCE_MAX_STEPS,
+                    max(8, 2 * len(tokens) + 8),
+                ),
+            )
+            causal_mask = torch.triu(
+                torch.ones(
+                    (decode_steps + 1, decode_steps + 1),
+                    dtype=torch.bool,
+                    device=device,
+                ),
+                diagonal=1,
+            ).unsqueeze(0).unsqueeze(0)
 
-            for _ in range(max_len - 1):
-                tgt_mask = make_tgt_mask(generated, pad_idx=tgt_pad_idx).to(device)
+            for _ in range(decode_steps):
+                tgt_len = generated.size(1)
+                tgt_mask = causal_mask[:, :, :tgt_len, :tgt_len]
                 logits = self.decode(memory, src_mask, generated, tgt_mask)
                 next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
                 generated = torch.cat([generated, next_token], dim=1)
-                if int(next_token.item()) == end_symbol:
+                if int(next_token.item()) in (end_symbol, tgt_pad_idx):
                     break
         finally:
             self.train(was_training)
@@ -857,12 +906,26 @@ class Transformer(nn.Module):
                     device=device,
                 )
 
-                for _ in range(max_len - 1):
-                    tgt_mask = make_tgt_mask(generated, pad_idx=pad_idx).to(device)
+                decode_steps = max(1, max_len - 1)
+                causal_mask = torch.triu(
+                    torch.ones(
+                        (decode_steps + 1, decode_steps + 1),
+                        dtype=torch.bool,
+                        device=device,
+                    ),
+                    diagonal=1,
+                ).unsqueeze(0).unsqueeze(0)
+
+                for _ in range(decode_steps):
+                    tgt_len = generated.size(1)
+                    tgt_mask = causal_mask[:, :, :tgt_len, :tgt_len]
                     logits = self.decode(memory, batch_src_mask, generated, tgt_mask)
                     next_tokens = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
                     generated = torch.cat([generated, next_tokens], dim=1)
-                    if torch.all(next_tokens.squeeze(1) == end_symbol):
+                    if torch.all(
+                        (next_tokens.squeeze(1) == end_symbol)
+                        | (next_tokens.squeeze(1) == pad_idx)
+                    ):
                         break
                 return generated
             finally:

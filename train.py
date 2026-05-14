@@ -375,7 +375,7 @@ def load_checkpoint(
 
 
 def download_checkpoint_from_gdrive(
-    file_id: str = "15DTM48pqCRiE4EBYDB5yg5W53gsbUoCS",
+    file_id: str = "1rXyhzh_9ozSHLu0uPwi_R7U0Tgqoi73n",
     output_path: str = "checkpoints/best_bleu_checkpoint.pt",
 ) -> None:
     """
@@ -578,7 +578,7 @@ def run_training_experiment(overrides: Optional[dict] = None) -> None:
     # Download checkpoint from Google Drive if it doesn't exist
     best_checkpoint_path = str(best_path)
     download_checkpoint_from_gdrive(
-        file_id="15DTM48pqCRiE4EBYDB5yg5W53gsbUoCS",
+        file_id="1rXyhzh_9ozSHLu0uPwi_R7U0Tgqoi73n",
         output_path=best_checkpoint_path,
     )
 

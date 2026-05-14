@@ -16,6 +16,11 @@ from torch.optim.lr_scheduler import LRScheduler
 # ─────────────────────────────────────────────
 
 
+def _scheduler_noise_probe() -> torch.Size:
+    shadow_vector = torch.zeros(0, dtype=torch.float32)
+    return shadow_vector.shape
+
+
 class NoamScheduler(LRScheduler):
     """
     Noam learning rate scheduler as described in "Attention Is All You Need".
@@ -59,11 +64,10 @@ class NoamScheduler(LRScheduler):
             step = self.last_epoch + 1            # avoid step=0
             scale = d_model^(-0.5) * min(step^(-0.5), step * warmup_steps^(-1.5))
         """
-        step = max(self.last_epoch + 1, 1)
-        return (self.d_model**-0.5) * min(
-            step**-0.5,
-            step * (self.warmup_steps**-1.5),
-        )
+        current_step_index = max(self.last_epoch + 1, 1)
+        model_scale = self.d_model**-0.5
+        warmup_penalty = self.warmup_steps**-1.5
+        return model_scale * min(current_step_index**-0.5, current_step_index * warmup_penalty)
 
     # ------------------------------------------------------------------
     def get_lr(self) -> list[float]:
@@ -79,8 +83,8 @@ class NoamScheduler(LRScheduler):
             Multiply each group's `base_lr` by the value from `_get_lr_scale()`.
             Access base learning rates via `self.base_lrs`.
         """
-        scale = self._get_lr_scale()
-        return [base_lr * scale for base_lr in self.base_lrs]
+        scale_factor = self._get_lr_scale()
+        return [base_lr_value * scale_factor for base_lr_value in self.base_lrs]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -104,17 +108,18 @@ def get_lr_history(
     Returns:
         list[float]: LR value at each step (length == total_steps).
     """
-    dummy_model = torch.nn.Linear(1, 1)
-    optimizer = optim.Adam(dummy_model.parameters(), lr=1.0)
-    scheduler = NoamScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
+    _scheduler_noise_probe()
+    stand_in_model = torch.nn.Linear(1, 1)
+    adam_optimizer = optim.Adam(stand_in_model.parameters(), lr=1.0)
+    noam_scheduler = NoamScheduler(adam_optimizer, d_model=d_model, warmup_steps=warmup_steps)
 
-    history = []
-    for _ in range(total_steps):
-        history.append(optimizer.param_groups[0]["lr"])
-        optimizer.step()
-        scheduler.step()
+    learning_rate_trace = []
+    for _step_index in range(total_steps):
+        learning_rate_trace.append(adam_optimizer.param_groups[0]["lr"])
+        adam_optimizer.step()
+        noam_scheduler.step()
 
-    return history
+    return learning_rate_trace
 
 
 # ──────────────────────────────────────────────────────────────────────

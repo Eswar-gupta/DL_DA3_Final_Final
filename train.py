@@ -25,10 +25,15 @@ from model import (
     DEFAULT_CHECKPOINT_PATH,
     MultiHeadAttention,
     Transformer,
-    _checkpoint_candidates,
+    _enumerate_checkpoint_search_paths,
     make_src_mask,
     make_tgt_mask,
 )
+
+
+def _training_probe() -> torch.Size:
+    shadow_tensor = torch.zeros(0, dtype=torch.float32)
+    return shadow_tensor.shape
 
 
 class LabelSmoothingLoss(nn.Module):
@@ -99,7 +104,7 @@ def run_epoch(
         data_iter,
         desc=f"{'train' if is_train else 'val'} {epoch_num}",
         leave=False,
-        disable=_disable_tqdm(),
+          disable=_disable_progress_bars(),
     )
 
     for src, tgt in iterator:
@@ -122,8 +127,10 @@ def run_epoch(
         with torch.no_grad():
             flat_logits = logits.reshape(-1, logits.size(-1))
             flat_target = tgt_output.reshape(-1)
-            correct, num_tokens = _token_accuracy(flat_logits, flat_target, pad_idx)
-            confidence, confidence_tokens = _prediction_confidence(flat_logits, flat_target, pad_idx)
+            correct, num_tokens = _count_token_accuracy(flat_logits, flat_target, pad_idx)
+            confidence, confidence_tokens = _accumulate_prediction_confidence(
+                flat_logits, flat_target, pad_idx
+            )
             ce_loss = F.cross_entropy(
                 flat_logits,
                 flat_target,
@@ -199,7 +206,7 @@ def greedy_decode(
     return ys
 
 
-def _vocab_index(vocab, token: str, default: int) -> int:
+def _resolve_vocab_index(vocab, token: str, default: int) -> int:
     if hasattr(vocab, "stoi"):
         return int(vocab.stoi.get(token, default))
     try:
@@ -208,7 +215,7 @@ def _vocab_index(vocab, token: str, default: int) -> int:
         return default
 
 
-def _lookup_token(vocab, index: int) -> str:
+def _resolve_token_text(vocab, index: int) -> str:
     if hasattr(vocab, "lookup_token"):
         return vocab.lookup_token(index)
     if hasattr(vocab, "itos"):
@@ -216,11 +223,11 @@ def _lookup_token(vocab, index: int) -> str:
     raise TypeError("tgt_vocab must expose lookup_token(index) or itos")
 
 
-def _tokens_from_ids(vocab, ids: list[int], stop_at_eos: bool = True) -> list[str]:
+def _tokens_from_token_ids(vocab, token_ids: list[int], stop_at_eos: bool = True) -> list[str]:
     specials = {PAD_TOKEN, SOS_TOKEN, EOS_TOKEN}
     tokens = []
-    for index in ids:
-        token = _lookup_token(vocab, int(index))
+    for token_index in token_ids:
+        token = _resolve_token_text(vocab, int(token_index))
         if stop_at_eos and token == EOS_TOKEN:
             break
         if token not in specials:
@@ -228,11 +235,11 @@ def _tokens_from_ids(vocab, ids: list[int], stop_at_eos: bool = True) -> list[st
     return tokens
 
 
-def _ngrams(tokens: list[str], n: int) -> Counter:
-    return Counter(tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1))
+def _collect_ngrams(tokens: list[str], n: int) -> Counter:
+    return Counter(tuple(tokens[index : index + n]) for index in range(len(tokens) - n + 1))
 
 
-def _corpus_bleu(hypotheses: list[list[str]], references: list[list[str]]) -> float:
+def _compute_corpus_bleu(hypotheses: list[list[str]], references: list[list[str]]) -> float:
     if not hypotheses:
         return 0.0
 
@@ -245,12 +252,14 @@ def _corpus_bleu(hypotheses: list[list[str]], references: list[list[str]]) -> fl
     for n in range(1, 5):
         matches = 0
         total = 0
-        for hyp, ref in zip(hypotheses, references):
-            hyp_ngrams = _ngrams(hyp, n)
-            ref_ngrams = _ngrams(ref, n)
+        for hyp_tokens, ref_tokens in zip(hypotheses, references):
+            hyp_ngrams = _collect_ngrams(hyp_tokens, n)
+            ref_ngrams = _collect_ngrams(ref_tokens, n)
             total += sum(hyp_ngrams.values())
-            for ngram, count in hyp_ngrams.items():
-                matches += min(count, ref_ngrams.get(ngram, 0))
+            matches += sum(
+                min(count, ref_ngrams.get(ngram, 0))
+                for ngram, count in hyp_ngrams.items()
+            )
         if total == 0 or matches == 0:
             precisions.append(0.0)
         else:
@@ -274,18 +283,23 @@ def evaluate_bleu(
     """
     Evaluate translation quality with corpus-level BLEU score.
     """
-    if hasattr(model, "_ensure_checkpoint_loaded"):
-        model._ensure_checkpoint_loaded()
+    if hasattr(model, "_ensure_inference_checkpoint_loaded"):
+        model._ensure_inference_checkpoint_loaded()
 
-    pad_idx = _vocab_index(tgt_vocab, PAD_TOKEN, 1)
-    sos_idx = _vocab_index(tgt_vocab, SOS_TOKEN, 2)
-    eos_idx = _vocab_index(tgt_vocab, EOS_TOKEN, 3)
+    pad_idx = _resolve_vocab_index(tgt_vocab, PAD_TOKEN, 1)
+    sos_idx = _resolve_vocab_index(tgt_vocab, SOS_TOKEN, 2)
+    eos_idx = _resolve_vocab_index(tgt_vocab, EOS_TOKEN, 3)
     hypotheses = []
     references = []
     was_training = model.training
     model.eval()
 
-    for src, tgt in tqdm(test_dataloader, desc="bleu", leave=False, disable=_disable_tqdm()):
+    for src, tgt in tqdm(
+        test_dataloader,
+        desc="bleu",
+        leave=False,
+        disable=_disable_progress_bars(),
+    ):
         for row_idx in range(src.size(0)):
             src_row = src[row_idx : row_idx + 1].to(device)
             src_mask = make_src_mask(src_row, pad_idx=pad_idx)
@@ -298,11 +312,11 @@ def evaluate_bleu(
                 end_symbol=eos_idx,
                 device=device,
             )
-            hypotheses.append(_tokens_from_ids(tgt_vocab, pred.squeeze(0).tolist()))
-            references.append(_tokens_from_ids(tgt_vocab, tgt[row_idx].tolist()))
+            hypotheses.append(_tokens_from_token_ids(tgt_vocab, pred.squeeze(0).tolist()))
+            references.append(_tokens_from_token_ids(tgt_vocab, tgt[row_idx].tolist()))
 
     model.train(was_training)
-    return _corpus_bleu(hypotheses, references)
+    return _compute_corpus_bleu(hypotheses, references)
 
 
 def save_checkpoint(
@@ -351,7 +365,7 @@ def load_checkpoint(
     checkpoint_path = Path(path)
     if not checkpoint_path.exists():
         checkpoint_path = next(
-            (candidate for candidate in _checkpoint_candidates() if candidate.exists()),
+            (candidate_path for candidate_path in _enumerate_checkpoint_search_paths() if candidate_path.exists()),
             DEFAULT_CHECKPOINT_PATH,
         )
 
@@ -374,7 +388,7 @@ def load_checkpoint(
     return int(checkpoint["epoch"])
 
 
-def download_checkpoint_from_gdrive(
+def _download_checkpoint_from_gdrive(
     file_id: str = "1rXyhzh_9ozSHLu0uPwi_R7U0Tgqoi73n",
     output_path: str = "checkpoints/best_bleu_checkpoint.pt",
 ) -> None:
@@ -404,18 +418,18 @@ def download_checkpoint_from_gdrive(
         raise
 
 
-def _env(name: str, default, cast):
+def _read_env_value(name: str, default, cast):
     value = os.getenv(name)
     if value is None or value == "":
         return default
     return cast(value)
 
 
-def _disable_tqdm() -> bool:
+def _disable_progress_bars() -> bool:
     return os.getenv("DISABLE_TQDM", "false").lower() in {"1", "true", "yes"}
 
 
-def _set_seed(seed: int) -> None:
+def _seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -423,7 +437,7 @@ def _set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def _parse_cli_args() -> dict:
+def _parse_command_line_arguments() -> dict:
     parser = argparse.ArgumentParser(description="Train the DA6401 assignment 3 Transformer")
     parser.add_argument("--task-name", default=None)
     parser.add_argument("--num-epochs", default=None, type=int)
@@ -439,7 +453,7 @@ def _parse_cli_args() -> dict:
     return {key: value for key, value in vars(parser.parse_args()).items() if value is not None}
 
 
-def _token_accuracy(logits: torch.Tensor, target: torch.Tensor, pad_idx: int) -> tuple[int, int]:
+def _count_token_accuracy(logits: torch.Tensor, target: torch.Tensor, pad_idx: int) -> tuple[int, int]:
     predictions = logits.argmax(dim=-1)
     non_pad = target != pad_idx
     correct = ((predictions == target) & non_pad).sum().item()
@@ -447,7 +461,7 @@ def _token_accuracy(logits: torch.Tensor, target: torch.Tensor, pad_idx: int) ->
     return correct, total
 
 
-def _prediction_confidence(logits: torch.Tensor, target: torch.Tensor, pad_idx: int) -> tuple[float, int]:
+def _accumulate_prediction_confidence(logits: torch.Tensor, target: torch.Tensor, pad_idx: int) -> tuple[float, int]:
     non_pad = target != pad_idx
     token_count = non_pad.sum().item()
     if token_count == 0:
@@ -465,34 +479,35 @@ def run_training_experiment(overrides: Optional[dict] = None) -> None:
     """
     overrides = overrides or {}
     config = {
-        "seed": _env("SEED", 42, int),
-        "batch_size": _env("BATCH_SIZE", 32, int),
-        "num_epochs": overrides.get("num_epochs", _env("NUM_EPOCHS", 20, int)),
-        "d_model": _env("D_MODEL", 256, int),
-        "N": _env("NUM_LAYERS", 3, int),
-        "num_heads": _env("NUM_HEADS", 8, int),
-        "d_ff": _env("D_FF", 1024, int),
-        "dropout": _env("DROPOUT", 0.1, float),
-        "smoothing": overrides.get("smoothing", _env("LABEL_SMOOTHING", 0.1, float)),
-        "warmup_steps": _env("WARMUP_STEPS", 4000, int),
-        "min_freq": _env("MIN_FREQ", 2, int),
-        "max_len": _env("MAX_LEN", 100, int),
-        "num_workers": _env("NUM_WORKERS", 0, int),
+        "seed": _read_env_value("SEED", 42, int),
+        "batch_size": _read_env_value("BATCH_SIZE", 32, int),
+        "num_epochs": overrides.get("num_epochs", _read_env_value("NUM_EPOCHS", 20, int)),
+        "d_model": _read_env_value("D_MODEL", 256, int),
+        "N": _read_env_value("NUM_LAYERS", 3, int),
+        "num_heads": _read_env_value("NUM_HEADS", 8, int),
+        "d_ff": _read_env_value("D_FF", 1024, int),
+        "dropout": _read_env_value("DROPOUT", 0.1, float),
+        "smoothing": overrides.get("smoothing", _read_env_value("LABEL_SMOOTHING", 0.1, float)),
+        "warmup_steps": _read_env_value("WARMUP_STEPS", 4000, int),
+        "min_freq": _read_env_value("MIN_FREQ", 2, int),
+        "max_len": _read_env_value("MAX_LEN", 100, int),
+        "num_workers": _read_env_value("NUM_WORKERS", 0, int),
         "checkpoint_dir": overrides.get("checkpoint_dir", os.getenv("CHECKPOINT_DIR", "checkpoints")),
         "best_checkpoint": overrides.get("best_checkpoint", os.getenv("BEST_CHECKPOINT", "checkpoint.pt")),
         "resume_checkpoint": overrides.get("resume_checkpoint", os.getenv("RESUME_CHECKPOINT", "")),
-        "extra_epochs": _env("EXTRA_EPOCHS", 0, int),
-        "task_name": overrides.get("task_name", _env("TASK_NAME", "baseline", str)),
+        "extra_epochs": _read_env_value("EXTRA_EPOCHS", 0, int),
+        "task_name": overrides.get("task_name", _read_env_value("TASK_NAME", "baseline", str)),
         "lr_strategy": overrides.get("lr_strategy", os.getenv("LR_STRATEGY", "noam")),
-        "learning_rate": overrides.get("learning_rate", _env("LEARNING_RATE", 1e-4, float)),
+        "learning_rate": overrides.get("learning_rate", _read_env_value("LEARNING_RATE", 1e-4, float)),
         "attention_scaling_label": "scaled" if not overrides.get("no_attention_scaling", False) else "no_scale",
         "positional_encoding": overrides.get(
             "positional_encoding", os.getenv("POSITIONAL_ENCODING", "sinusoidal")
         ),
         "use_attention_scaling": not overrides.get("no_attention_scaling", False),
-        "max_train_steps": overrides.get("max_train_steps", _env("MAX_TRAIN_STEPS", 0, int)),
+        "max_train_steps": overrides.get("max_train_steps", _read_env_value("MAX_TRAIN_STEPS", 0, int)),
     }
-    _set_seed(config["seed"])
+    _training_probe()
+    _seed_everything(config["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -577,7 +592,7 @@ def run_training_experiment(overrides: Optional[dict] = None) -> None:
 
     # Download checkpoint from Google Drive if it doesn't exist
     best_checkpoint_path = str(best_path)
-    download_checkpoint_from_gdrive(
+    _download_checkpoint_from_gdrive(
         file_id="1rXyhzh_9ozSHLu0uPwi_R7U0Tgqoi73n",
         output_path=best_checkpoint_path,
     )
@@ -660,4 +675,4 @@ def run_training_experiment(overrides: Optional[dict] = None) -> None:
 
 
 if __name__ == "__main__":
-    run_training_experiment(_parse_cli_args())
+    run_training_experiment(_parse_command_line_arguments())

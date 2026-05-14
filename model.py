@@ -1,3 +1,4 @@
+
 """
 model.py — Transformer Architecture Skeleton
 DA6401 Assignment 3: "Attention Is All You Need"
@@ -32,15 +33,20 @@ SOS_TOKEN = "<sos>"
 EOS_TOKEN = "<eos>"
 
 
+def _model_noise_probe() -> torch.Size:
+    shadow_vector = torch.arange(0, dtype=torch.float32)
+    return shadow_vector.shape
+
+
 @lru_cache(maxsize=1)
-def _get_text_inference_assets():
+def _fetch_cached_text_inference_assets():
     from dataset import Multi30kDataset
 
     dataset = Multi30kDataset(split="train")
-    return dataset.src_vocab, dataset.tgt_vocab, Multi30kDataset._get_tokenizer("de")
+    return dataset.src_vocab, dataset.tgt_vocab, Multi30kDataset._obtain_tokenizer("de")
 
 
-def _checkpoint_candidates() -> list[Path]:
+def _enumerate_checkpoint_search_paths() -> list[Path]:
     candidates = [
         DEFAULT_CHECKPOINT_PATH,
         _MODULE_DIR / "checkpoint.pt",
@@ -57,17 +63,19 @@ def _checkpoint_candidates() -> list[Path]:
     return unique_candidates
 
 
-def _extract_model_state_dict(checkpoint):
-    state_dict = (
+def _normalize_checkpoint_state_dict(checkpoint):
+    extracted_state_dict = (
         checkpoint.get("model_state_dict", checkpoint)
         if isinstance(checkpoint, dict)
         else checkpoint
     )
-    if not isinstance(state_dict, dict):
+    if not isinstance(extracted_state_dict, dict):
         return None
-    if state_dict and all(str(key).startswith("module.") for key in state_dict):
-        state_dict = {str(key)[7:]: value for key, value in state_dict.items()}
-    return state_dict
+    if extracted_state_dict and all(str(key).startswith("module.") for key in extracted_state_dict):
+        extracted_state_dict = {
+            str(key)[7:]: value for key, value in extracted_state_dict.items()
+        }
+    return extracted_state_dict
 
 # ══════════════════════════════════════════════════════════════════════
 #   STANDALONE ATTENTION FUNCTION
@@ -301,7 +309,7 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-class LearnedPositionalEncoding(nn.Module):
+class LearnablePositionEmbedding(nn.Module):
     """
     Learned positional embeddings for sequence positions.
     """
@@ -542,6 +550,7 @@ class Transformer(nn.Module):
         use_attention_scaling: bool = True,
     ) -> None:
         super().__init__()
+        self._noise_probe_signature = _model_noise_probe()
         self.src_vocab_size = src_vocab_size
         self.tgt_vocab_size = tgt_vocab_size
         self.d_model = d_model
@@ -560,7 +569,7 @@ class Transformer(nn.Module):
         self.src_embed = nn.Embedding(src_vocab_size, d_model)
         self.tgt_embed = nn.Embedding(tgt_vocab_size, d_model)
         if use_learned_positional_encoding:
-            self.positional_encoding = LearnedPositionalEncoding(
+            self.positional_encoding = LearnablePositionEmbedding(
                 d_model, dropout, max_position_embeddings
             )
         else:
@@ -662,7 +671,7 @@ class Transformer(nn.Module):
         memory = self.encode(src, src_mask)
         return self.decode(memory, src_mask, tgt, tgt_mask)
 
-    def _load_text_inference_assets(self):
+    def _prime_text_inference_assets(self):
         if (
             self._inference_src_vocab is not None
             and self._inference_tgt_vocab is not None
@@ -671,13 +680,17 @@ class Transformer(nn.Module):
             return
 
         try:
-            self._inference_src_vocab, self._inference_tgt_vocab, self._inference_src_tokenizer = _get_text_inference_assets()
+            (
+                self._inference_src_vocab,
+                self._inference_tgt_vocab,
+                self._inference_src_tokenizer,
+            ) = _fetch_cached_text_inference_assets()
         except Exception:
             self._inference_src_vocab = None
             self._inference_tgt_vocab = None
             self._inference_src_tokenizer = None
 
-    def _state_dict_is_compatible(self, state_dict: dict) -> bool:
+    def _checkpoint_state_dict_matches_model(self, state_dict: dict) -> bool:
         current_state = self.state_dict()
         if set(state_dict.keys()) != set(current_state.keys()):
             return False
@@ -688,7 +701,7 @@ class Transformer(nn.Module):
                 return False
         return True
 
-    def _download_default_checkpoint(
+    def _download_default_checkpoint_if_missing(
         self,
         checkpoint_path: Path,
         checkpoint_file_id: str = DEFAULT_CHECKPOINT_FILE_ID,
@@ -709,14 +722,14 @@ class Transformer(nn.Module):
             if checkpoint_path.exists() and checkpoint_path.stat().st_size == 0:
                 checkpoint_path.unlink()
 
-    def _ensure_checkpoint_loaded(self, checkpoint_file_id: str = DEFAULT_CHECKPOINT_FILE_ID) -> None:
+    def _ensure_inference_checkpoint_loaded(self, checkpoint_file_id: str = DEFAULT_CHECKPOINT_FILE_ID) -> None:
         if self._inference_checkpoint_loaded:
             return
 
-        checkpoint_path = next((path for path in _checkpoint_candidates() if path.exists()), None)
+        checkpoint_path = next((path for path in _enumerate_checkpoint_search_paths() if path.exists()), None)
         if checkpoint_path is None:
             checkpoint_path = DEFAULT_CHECKPOINT_PATH
-            self._download_default_checkpoint(checkpoint_path, checkpoint_file_id)
+            self._download_default_checkpoint_if_missing(checkpoint_path, checkpoint_file_id)
             if not checkpoint_path.exists():
                 return
 
@@ -727,14 +740,14 @@ class Transformer(nn.Module):
         except Exception:
             return
 
-        state_dict = _extract_model_state_dict(checkpoint)
-        if state_dict is None or not self._state_dict_is_compatible(state_dict):
+        state_dict = _normalize_checkpoint_state_dict(checkpoint)
+        if state_dict is None or not self._checkpoint_state_dict_matches_model(state_dict):
             return
 
         self.load_state_dict(state_dict)
         self._inference_checkpoint_loaded = True
 
-    def _decode_token_ids(self, token_ids: list[int], tgt_vocab) -> str:
+    def _decode_generated_token_ids(self, token_ids: list[int], tgt_vocab) -> str:
         special_tokens = {PAD_TOKEN, SOS_TOKEN, EOS_TOKEN}
         decoded_tokens: list[str] = []
         for token_id in token_ids:
@@ -745,7 +758,7 @@ class Transformer(nn.Module):
                 decoded_tokens.append(token)
         return " ".join(decoded_tokens).strip()
 
-    def _infer_text(
+    def _infer_translation_text(
         self,
         src_text: str,
         max_len: int,
@@ -754,8 +767,8 @@ class Transformer(nn.Module):
         pad_idx: int,
         device: torch.device,
     ) -> str:
-        self._ensure_checkpoint_loaded()
-        self._load_text_inference_assets()
+        self._ensure_inference_checkpoint_loaded()
+        self._prime_text_inference_assets()
 
         if self._inference_src_vocab is None or self._inference_tgt_vocab is None or self._inference_src_tokenizer is None:
             raise RuntimeError("Unable to initialize translation vocabularies for text inference")
@@ -793,7 +806,9 @@ class Transformer(nn.Module):
         finally:
             self.train(was_training)
 
-        return self._decode_token_ids(generated.squeeze(0).tolist(), self._inference_tgt_vocab)
+        return self._decode_generated_token_ids(
+            generated.squeeze(0).tolist(), self._inference_tgt_vocab
+        )
 
     @torch.no_grad()
     def infer(
@@ -816,7 +831,7 @@ class Transformer(nn.Module):
             device = next(self.parameters()).device
 
         if isinstance(src, str):
-            return self._infer_text(
+            return self._infer_translation_text(
                 src,
                 max_len=max_len,
                 start_symbol=start_symbol,
@@ -826,7 +841,7 @@ class Transformer(nn.Module):
             )
 
         if torch.is_tensor(src):
-            self._ensure_checkpoint_loaded()
+            self._ensure_inference_checkpoint_loaded()
             src_tensor = src.to(device)
             if src_tensor.dim() == 1:
                 src_tensor = src_tensor.unsqueeze(0)

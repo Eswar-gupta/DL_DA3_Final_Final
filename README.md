@@ -10,7 +10,6 @@
 | 2.4 | Sinusoidal vs Learned Positional Embeddings | [Open report](https://wandb.ai/v-eswar2005-massachusetts-institute-of-technology/DA6401_assignement3_EE23B085/reports/2-4-Positional-Encoding-vs-Learned-Embeddings-10-Marks---VmlldzoxNjg4NDEwNQ?accessToken=nk17lrd0ulfpf5do8gd9h111965xe7yh3y6rke4knu2jox2z9glzfp4klmk0t88o) |
 | 2.5 | Decoder Sensitivity to Label Smoothing | [Open report](https://wandb.ai/v-eswar2005-massachusetts-institute-of-technology/DA6401_assignement3_EE23B085/reports/2-5-Decoder-Sensitivity-Label-Smoothing-10-Marks---VmlldzoxNjg4NDE1OA?accessToken=3xwheekzo1kkrcqsyf5d9ti5z62kim5fg6jmnb7jtp03vgj91yhagp5i562vqty5) |
 
-Additional W&B report list: [DA6401 Assignment 3 reports](https://wandb.ai/sadamrk2005-indian-institute-of-technology-madras/DA6401_assignement3/reportlist)
 
 GitHub repository: [da6401_assignement3](https://github.com/ee23b067-cmd/da6401_assignement3/tree/main)
 

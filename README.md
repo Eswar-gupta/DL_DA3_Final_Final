@@ -11,8 +11,6 @@
 | 2.5 | Decoder Sensitivity to Label Smoothing | [Open report](https://wandb.ai/v-eswar2005-massachusetts-institute-of-technology/DA6401_assignement3_EE23B085/reports/2-5-Decoder-Sensitivity-Label-Smoothing-10-Marks---VmlldzoxNjg4NDE1OA?accessToken=3xwheekzo1kkrcqsyf5d9ti5z62kim5fg6jmnb7jtp03vgj91yhagp5i562vqty5) |
 
 
-GitHub repository: [da6401_assignement3](https://github.com/ee23b067-cmd/da6401_assignement3/tree/main)
-
 ## Project Overview
 
 This repository implements a Transformer-based neural machine translation system for the DA6401 Introduction to Deep Learning Assignment 3. The model follows the core ideas from **"Attention Is All You Need"** and is trained for **German to English translation** on the Multi30k dataset.
